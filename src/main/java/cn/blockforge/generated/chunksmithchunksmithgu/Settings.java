@@ -1,0 +1,66 @@
+package cn.blockforge.generated.chunksmithchunksmithgu;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+
+/**
+ * 面板自身的持久化设置：写在我们模组目录下的 properties 文件里。
+ * 键位（默认 P）不在这——那是原版控制设置管的（KeyMapping 自动出现在“按键绑定”里）。
+ */
+public final class Settings {
+    private static final Properties P = new Properties();
+
+    // 主题：holographic（全息科技） / light（原版轻量）
+    public static String theme = "holographic";
+    // 任务运行时面板边缘的进度粒子
+    public static boolean particles = true;
+    // 完成提示音
+    public static boolean sounds = true;
+    // 面板打开时自动刷新进度的秒数（0 = 关）
+    public static int progressRefreshSec = 5;
+    // 热力图默认半窗宽（区块数）
+    public static int heatmapRadius = 128;
+    // 界面大小（百分比，100 = 面板按设计尺寸铺满能放下的空间）
+    public static int uiScalePercent = 100;
+    // 面板四角的藤蔓花草装饰
+    public static boolean decorations = true;
+
+    private static Path file() {
+        return ChunkSmithGuiPaths.panelDir().resolve("panel-settings.properties");
+    }
+
+    public static void load() {
+        try {
+            Path f = file();
+            if (Files.isRegularFile(f)) {
+                P.load(Files.newBufferedReader(f, StandardCharsets.UTF_8));
+            }
+        } catch (IOException ignored) {
+        }
+        theme = P.getProperty("theme", theme);
+        particles = Boolean.parseBoolean(P.getProperty("particles", "true"));
+        sounds = Boolean.parseBoolean(P.getProperty("sounds", "true"));
+        try { progressRefreshSec = Integer.parseInt(P.getProperty("refresh", "5")); } catch (NumberFormatException ignored) { }
+        try { heatmapRadius = Integer.parseInt(P.getProperty("heatRadius", "128")); } catch (NumberFormatException ignored) { }
+        try { uiScalePercent = Integer.parseInt(P.getProperty("uiScale", "100")); } catch (NumberFormatException ignored) { }
+        decorations = Boolean.parseBoolean(P.getProperty("decorations", "true"));
+    }
+
+    public static void save() {
+        try {
+            Files.createDirectories(file().getParent());
+            P.setProperty("theme", theme);
+            P.setProperty("particles", String.valueOf(particles));
+            P.setProperty("sounds", String.valueOf(sounds));
+            P.setProperty("refresh", String.valueOf(progressRefreshSec));
+            P.setProperty("heatRadius", String.valueOf(heatmapRadius));
+            P.setProperty("uiScale", String.valueOf(uiScalePercent));
+            P.setProperty("decorations", String.valueOf(decorations));
+            P.store(Files.newBufferedWriter(file(), StandardCharsets.UTF_8), "ChunkSmith Panel Settings");
+        } catch (IOException ignored) {
+        }
+    }
+}
