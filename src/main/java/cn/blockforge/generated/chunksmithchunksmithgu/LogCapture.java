@@ -110,19 +110,30 @@ public final class LogCapture {
             PrereqStatus.serverRejected = false;
         }
 
-        // 先解析数字，再按结果决定状态机：完成回包不能被后面的百分比再顶回“正在生成”
-        parseProgress(lower, text, taskDone);
+        // 只有真正的进度行才允许改数字。Chunksmith 每次 /cs progress 在进度行后面还会跟一条
+        // “I/O throttle active - concurrency: 22/200”，里面的 22/200 不是区块数；背压通知里
+        // 还有 “43% of the heap” 这种百分比。它们进日志可以，进进度条就会把三项全带偏。
+        boolean progressLine = isProgressLine(lower, text) && !isNoticeLine(lower);
 
-        // 取消完成：服务端已经不跑了，本地要跟着回到空闲，否则面板会一直挂着“正在生成”
+        // 先解析数字，再按结果决定状态机：完成回包不能被后面的百分比再顶回“正在生成”
+        parseProgress(lower, text, taskDone, progressLine);
+
+        // 取消完成：服务端已经不跑了，本地要跟着回到空闲，否则面板会一直挂着“正在生成”。
+        // 只有真正的进度行 / 明确的“没有任务”回包才能判定完成——否则回复窗口期内路人的
+        // 一句普通聊天（碰巧含 done / 完成）就会把任务标成已完成，轮询随之停掉，总进度看起来就冻住了。
         if (cancelDone) {
             cancelNow();
-        } else if (lv == PanelState.Level.OK && !cancelish
+        } else if (lv == PanelState.Level.OK && !cancelish && (progressLine || noTask)
                 && (PanelState.task == PanelState.Task.RUNNING || PanelState.task == PanelState.Task.PAUSED)) {
             completeNow();
         }
 
-        // 同一行原文别重复刷
-        if (!text.equals(PanelState.taskRawStatus)) {
+        // 同一行原文别重复刷。限流/背压这类通知不覆盖「原始回包」，
+        // 否则状态框末尾永远挂着 “concurrency: 22/200”，看着像区块进度。
+        boolean pausedLine = lower.contains("pause") || lower.contains("暂停");
+        boolean meaningful = progressLine || taskDone || noTask || cancelish || pausedLine
+                || lv != PanelState.Level.INFO;
+        if (meaningful && !text.equals(PanelState.taskRawStatus)) {
             PanelState.taskRawStatus = text;
         }
         PanelState.log(lv, text);
@@ -183,44 +194,72 @@ public final class LogCapture {
                 || raw.contains("任务取消于") || raw.contains("中止所有任务");
     }
 
-    private void parseProgress(String lower, String raw, boolean doneLine) {
+    /**
+     * 真正的任务进度行。Chunksmith / Chunky 的进度文案固定带 “Processed:”（英文）
+     * 或 “处理了 / 已处理”（中文）：
+     *   EN: Task running for X. Processed: N chunks (P%), ETA: …, Rate: … cps, …
+     *   ZH: 任务运行于世界 X。 处理了 N 个区块 (P%), 预计距完成还有: …
+     * 限流、背压、校验失败、LOD 汇总这些通知都没有这个特征词，但它们同样带
+     * “22/200”“43%”之类的数字，所以必须先分辨行类型，再决定要不要解析数字。
+     */
+    private static boolean isProgressLine(String lower, String raw) {
+        return lower.contains("processed:") || raw.contains("处理了") || raw.contains("已处理");
+    }
+
+    /**
+     * 已知的非进度通知行（限流 / 背压 / 常驻 / 堆内存 / 校验 / LOD 汇总）。
+     * 进度行本身不会出现这些词，所以它们是一道“防止今后新增文案再混进来”的保险。
+     */
+    private static boolean isNoticeLine(String lower) {
+        return lower.contains("throttle") || lower.contains("backpressure")
+                || lower.contains("concurrency") || lower.contains("heap")
+                || lower.contains("residency") || lower.contains("verification")
+                || lower.contains("lod for");
+    }
+
+    private void parseProgress(String lower, String raw, boolean doneLine, boolean progressLine) {
         // 取消 / 确认这条链路里的回包不能被当成“还在跑”（回包常带着进度百分比）
         boolean cancelish = lower.contains("cancel") || lower.contains("取消")
                 || lower.contains("confirm") || lower.contains("确认");
         boolean noTask = isNoTask(lower, raw);
         boolean paused = lower.contains("pause") || lower.contains("paused") || lower.contains("暂停");
 
-        // 先把这一条里能认出来的数字全解析出来，再统一决定状态机怎么走
+        // 先把这一条里能认出来的数字全解析出来，再统一决定状态机怎么走。
+        // 非进度行一律不碰数字：限流通知里的 “22/200”、背压通知里的 “43%” 都不是区块进度。
         double pct = -1, rate = -1;
         long proc = -1, totalPair = -1, eta = -1;
 
-        Matcher m = P_PCT.matcher(raw);
-        if (m.find()) pct = Double.parseDouble(m.group(1));
+        if (progressLine) {
+            Matcher m = P_PCT.matcher(raw);
+            if (m.find()) pct = Double.parseDouble(m.group(1));
 
-        m = P_PROCESSED.matcher(raw);
-        if (m.find()) proc = parseNum(m.group(1));
-        if (proc < 0) {
-            m = P_COUNT.matcher(raw);
+            m = P_PROCESSED.matcher(raw);
+            if (m.find()) proc = parseNum(m.group(1));
+            // 备用格式只在确认是区块 / 区域行时才用，杜绝 “5 of 200 samples” 之类的误命中
+            if (proc < 0 && (lower.contains("chunk") || lower.contains("region")
+                    || raw.contains("区块") || raw.contains("区域"))) {
+                m = P_COUNT.matcher(raw);
+                if (m.find()) {
+                    long a = parseNum(m.group(1)), b = parseNum(m.group(2));
+                    if (a >= 0 && b > 0) { proc = a; totalPair = b; }
+                }
+            }
+
+            m = P_RATE.matcher(raw);
+            if (m.find()) rate = Double.parseDouble(m.group(1));
+
+            m = P_ETA_CLOCK.matcher(raw);
             if (m.find()) {
-                long a = parseNum(m.group(1)), b = parseNum(m.group(2));
-                if (a >= 0 && b > 0) { proc = a; totalPair = b; }
-            }
-        }
-
-        m = P_RATE.matcher(raw);
-        if (m.find()) rate = Double.parseDouble(m.group(1));
-
-        m = P_ETA_CLOCK.matcher(raw);
-        if (m.find()) {
-            eta = clockMs(num(m.group(1)), num(m.group(2)), num(m.group(3)));
-        } else {
-            m = P_ETA_TEXT.matcher(raw);
-            if (m.find() && (m.group(1) != null || m.group(2) != null || m.group(3) != null)) {
                 eta = clockMs(num(m.group(1)), num(m.group(2)), num(m.group(3)));
+            } else {
+                m = P_ETA_TEXT.matcher(raw);
+                if (m.find() && (m.group(1) != null || m.group(2) != null || m.group(3) != null)) {
+                    eta = clockMs(num(m.group(1)), num(m.group(2)), num(m.group(3)));
+                }
             }
         }
 
-        boolean hasNumbers = pct >= 0 || proc >= 0;
+        boolean hasNumbers = progressLine && (pct >= 0 || proc >= 0);
         long now = System.currentTimeMillis();
 
         if (PanelState.task == PanelState.Task.DONE) {
@@ -235,7 +274,7 @@ public final class LogCapture {
         }
 
         // 完成回包（task_done）单独收尾：这里的百分比往往停在 97.xx，绝不能拿它当最终进度
-        if (doneLine) {
+        if (doneLine && progressLine) {
             if (PanelState.task == PanelState.Task.NONE) {
                 // 前置自己续跑的任务没被面板看到就已经跑完，也要正确亮一次“已完成”
                 PanelState.task = PanelState.Task.RUNNING;
@@ -280,8 +319,8 @@ public final class LogCapture {
             PanelState.elapsedMs = -1;
             PanelState.completeFlashUntilMs = 0;
         }
-        // 进度已经到头就直接收工，别等 “No tasks running.”
-        if (PanelState.task == PanelState.Task.RUNNING
+        // 进度已经到头就直接收工，别等 “No tasks running.”（只认真正的进度行，防止被通知行里的数字误判）
+        if (progressLine && PanelState.task == PanelState.Task.RUNNING
                 && (pct >= 100 || (proc >= 0 && PanelState.total > 0 && proc >= PanelState.total))) {
             completeNow();
         }
