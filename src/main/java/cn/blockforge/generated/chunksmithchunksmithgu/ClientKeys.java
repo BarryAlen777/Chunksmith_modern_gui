@@ -4,15 +4,14 @@ import cn.blockforge.generated.chunksmithchunksmithgu.gui.PanelScreen;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import org.lwjgl.glfw.GLFW;
 
 /**
  * 默认 P 键开面板；键位可在原版“控制 → 按键绑定”里修改（标准 KeyMapping）。
+ *
+ * <p>这个类整个都是客户端专属的，注册入口在 {@link ClientSetup}（仅客户端加载）。</p>
  */
 public final class ClientKeys {
 
@@ -21,6 +20,9 @@ public final class ClientKeys {
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_P,
             "key.categories." + ChunkSmithGuiMod.MOD_ID);
+
+    private ClientKeys() {
+    }
 
     /** forge 总线上的客户端 tick 监听。 */
     public static final class TickEvents {
@@ -38,12 +40,5 @@ public final class ClientKeys {
             }
             PrereqStatus.refreshTree();
         }
-    }
-
-    public static void init(IEventBus modBus) {
-        // RegisterKeyMappingsEvent 是 mod 总线事件，直接挂 lambda，服务端不会加载本类
-        modBus.addListener((net.minecraftforge.client.event.RegisterKeyMappingsEvent e) -> e.register(TOGGLE));
-        modBus.addListener((FMLClientSetupEvent e) ->
-                MinecraftForge.EVENT_BUS.register(new TickEvents()));
     }
 }

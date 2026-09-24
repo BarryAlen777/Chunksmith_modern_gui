@@ -29,14 +29,17 @@ public final class Settings {
     public static boolean decorations = true;
 
     private static Path file() {
-        return ChunkSmithGuiPaths.panelDir().resolve("panel-settings.properties");
+        return ChunkSmithGuiPaths.ensurePanelDir().resolve("panel-settings.properties");
     }
 
     public static void load() {
+        P.clear();
         try {
             Path f = file();
             if (Files.isRegularFile(f)) {
-                P.load(Files.newBufferedReader(f, StandardCharsets.UTF_8));
+                try (var reader = Files.newBufferedReader(f, StandardCharsets.UTF_8)) {
+                    P.load(reader);
+                }
             }
         } catch (IOException ignored) {
         }
@@ -47,6 +50,10 @@ public final class Settings {
         try { heatmapRadius = Integer.parseInt(P.getProperty("heatRadius", "128")); } catch (NumberFormatException ignored) { }
         try { uiScalePercent = Integer.parseInt(P.getProperty("uiScale", "100")); } catch (NumberFormatException ignored) { }
         decorations = Boolean.parseBoolean(P.getProperty("decorations", "true"));
+        progressRefreshSec = Math.max(0, Math.min(60, progressRefreshSec));
+        heatmapRadius = Math.max(16, Math.min(256, heatmapRadius));
+        heatmapRadius = 16 * Math.round(heatmapRadius / 16.0f);
+        uiScalePercent = Math.max(50, Math.min(200, uiScalePercent));
     }
 
     public static void save() {
@@ -59,7 +66,9 @@ public final class Settings {
             P.setProperty("heatRadius", String.valueOf(heatmapRadius));
             P.setProperty("uiScale", String.valueOf(uiScalePercent));
             P.setProperty("decorations", String.valueOf(decorations));
-            P.store(Files.newBufferedWriter(file(), StandardCharsets.UTF_8), "ChunkSmith Panel Settings");
+            try (var writer = Files.newBufferedWriter(file(), StandardCharsets.UTF_8)) {
+                P.store(writer, "ChunkSmith Panel Settings");
+            }
         } catch (IOException ignored) {
         }
     }

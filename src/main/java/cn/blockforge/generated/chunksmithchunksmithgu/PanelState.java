@@ -161,6 +161,12 @@ public final class PanelState {
     }
     public static volatile HeatData heat = null;
     public static volatile long heatRequestSentMs = 0;
+    /** 每次拉取递增，防止较早的异步回包覆盖较新的热力图。 */
+    public static volatile int heatRequestId = 0;
+
+    public static synchronized int nextHeatRequestId() {
+        return ++heatRequestId;
+    }
     public static volatile boolean heatNoServer = false; // 发送失败/超时 => 服务端没装本模组
 
     // ---------- /cs set 历史与备份 ----------

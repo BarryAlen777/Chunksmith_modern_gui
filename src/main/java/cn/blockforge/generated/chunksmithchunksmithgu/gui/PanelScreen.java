@@ -7,6 +7,7 @@ import cn.blockforge.generated.chunksmithchunksmithgu.PanelState;
 import cn.blockforge.generated.chunksmithchunksmithgu.PrereqStatus;
 import cn.blockforge.generated.chunksmithchunksmithgu.Settings;
 import cn.blockforge.generated.chunksmithchunksmithgu.net.Net;
+import cn.blockforge.generated.chunksmithchunksmithgu.net.NetClient;
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -115,7 +116,7 @@ public class PanelScreen extends Screen {
         pendingPercent = Settings.uiScalePercent;
         heatHalf = Settings.heatmapRadius;
         computeTransform();
-        Net.requestHandshake();
+        NetClient.requestHandshake();
         buildChrome();
         buildTab();
         // 前置会“续跑”上次没跑完的任务，刚进游戏时它已经在跑了；面板得主动问几次才知道
@@ -193,7 +194,7 @@ public class PanelScreen extends Screen {
      */
     private void maybeAutoRefresh(long now) {
         int sec = Settings.progressRefreshSec;
-        if (PanelState.task == PanelState.Task.RUNNING) {
+        if (PanelState.task == PanelState.Task.RUNNING || PanelState.task == PanelState.Task.PAUSED) {
             if (sec <= 0 || !PrereqStatus.prereqOk()) return;
             if (now - lastAutoRefreshMs < sec * 1000L) return;
             lastAutoRefreshMs = now;
@@ -873,7 +874,7 @@ public class PanelScreen extends Screen {
         }
         int[] c = heatCenterChunks();
         if (canvas != null) { canvas.scx = c[0]; canvas.scz = c[1]; canvas.half = heatHalf; }
-        Net.requestHeatmap(heatDim, c[0], c[1], heatHalf);
+        NetClient.requestHeatmap(heatDim, c[0], c[1], heatHalf);
         toast("正在扫描 " + heatDim + "（±" + heatHalf + " 区块）");
     }
 

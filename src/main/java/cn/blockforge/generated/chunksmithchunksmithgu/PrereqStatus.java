@@ -2,6 +2,8 @@ package cn.blockforge.generated.chunksmithchunksmithgu;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.forgespi.language.IModInfo;
 
@@ -87,7 +89,12 @@ public final class PrereqStatus {
      * 重新探测服务器命令树（1 秒节流）。返回缓存值。
      * 树里出现 cs/chunky 根节点 ⇒ 服务端存在前置；
      * 其子节点里有 start/trim/set ⇒ 当前玩家是管理级（树按权限过滤过）。
+     *
+     * <p>只认客户端连接，所以标 {@code @OnlyIn(Dist.CLIENT)}：专用服务器加载本类时
+     * Forge 会把整个方法删掉，服务端不会因为这里引用 {@code Minecraft} 而报
+     * “invalid dist DEDICATED_SERVER”。</p>
      */
+    @OnlyIn(Dist.CLIENT)
     public static synchronized boolean refreshTree() {
         long now = System.currentTimeMillis();
         if (now - lastTreeScanMs < 1000) return commandTreeSeen;
@@ -122,7 +129,8 @@ public final class PrereqStatus {
         return commandTreeSeen;
     }
 
-    /** 面板可用的“前置是否到位”总判定。 */
+    /** 面板可用的“前置是否到位”总判定。客户端专属。 */
+    @OnlyIn(Dist.CLIENT)
     public static boolean prereqOk() {
         refreshTree();
         if (serverRejected) return false;
@@ -131,7 +139,8 @@ public final class PrereqStatus {
         return localPresent();
     }
 
-    /** 玩家能不能执行管理类指令（开始/暂停/清理/设置）。 */
+    /** 玩家能不能执行管理类指令（开始/暂停/清理/设置）。客户端专属。 */
+    @OnlyIn(Dist.CLIENT)
     public static boolean isOperator() {
         refreshTree();
         if (perm == Perm.OPERATOR) return true;

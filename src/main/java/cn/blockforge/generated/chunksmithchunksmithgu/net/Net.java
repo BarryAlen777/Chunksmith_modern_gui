@@ -3,7 +3,6 @@ package cn.blockforge.generated.chunksmithchunksmithgu.net;
 import cn.blockforge.generated.chunksmithchunksmithgu.ChunkSmithGuiMod;
 import cn.blockforge.generated.chunksmithchunksmithgu.PanelState;
 import cn.blockforge.generated.chunksmithchunksmithgu.PrereqStatus;
-import net.minecraft.client.Minecraft;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -130,26 +129,30 @@ public final class Net {
     // ==================== 热力图 ====================
 
     public static final class HeatmapC2S {
+        final int requestId;
         final String dim; final int cx, cz, half;
-        HeatmapC2S(String d, int x, int z, int h) { dim = d; cx = x; cz = z; half = h; }
+        HeatmapC2S(int id, String d, int x, int z, int h) { requestId = id; dim = d; cx = x; cz = z; half = h; }
         static void encode(HeatmapC2S m, FriendlyByteBuf b) {
+            b.writeVarInt(m.requestId);
             b.writeUtf(m.dim); b.writeVarInt(m.cx); b.writeVarInt(m.cz); b.writeVarInt(m.half);
         }
         static HeatmapC2S decode(FriendlyByteBuf b) {
-            return new HeatmapC2S(b.readUtf(128), b.readVarInt(), b.readVarInt(), b.readVarInt());
+            return new HeatmapC2S(b.readVarInt(), b.readUtf(128), b.readVarInt(), b.readVarInt(), b.readVarInt());
         }
     }
 
     /** 每个 region（32x32 区块）一张 1024bit 位图，按位存在与否。 */
     public static final class HeatmapS2C {
+        final int requestId;
         final String dim; final int cx, cz, half;
         final int regions;            // 条目数
         final int[] rx, rz;           // region 坐标
         final byte[][] bits;          // 每 region 128 字节位图
-        HeatmapS2C(String d, int x, int z, int h, int[] rx, int[] rz, byte[][] bits) {
-            dim = d; cx = x; cz = z; half = h; regions = rx.length; this.rx = rx; this.rz = rz; this.bits = bits;
+        HeatmapS2C(int id, String d, int x, int z, int h, int[] rx, int[] rz, byte[][] bits) {
+            requestId = id; dim = d; cx = x; cz = z; half = h; regions = rx.length; this.rx = rx; this.rz = rz; this.bits = bits;
         }
         static void encode(HeatmapS2C m, FriendlyByteBuf b) {
+            b.writeVarInt(m.requestId);
             b.writeUtf(m.dim); b.writeVarInt(m.cx); b.writeVarInt(m.cz); b.writeVarInt(m.half);
             b.writeVarInt(m.regions);
             for (int i = 0; i < m.regions; i++) {
@@ -158,6 +161,7 @@ public final class Net {
             }
         }
         static HeatmapS2C decode(FriendlyByteBuf b) {
+            int id = b.readVarInt();
             String d = b.readUtf(128);
             int x = b.readVarInt(), z = b.readVarInt(), h = b.readVarInt();
             int n = Math.min(b.readVarInt(), 65536);
@@ -168,45 +172,14 @@ public final class Net {
                 bits[i] = new byte[128];
                 b.readBytes(bits[i]);
             }
-            return new HeatmapS2C(d, x, z, h, rx, rz, bits);
+            return new HeatmapS2C(id, d, x, z, h, rx, rz, bits);
         }
     }
 
-    /** 面板打开时向服务端问一次前置/世界信息（服务端没装模组则静默失败）。 */
-    public static void requestHandshake() {
-        try {
-            CHANNEL.sendToServer(new HandshakeC2S());
-        } catch (Throwable t) {
-            serverWorlds = null;
-        }
-    }
-
-    /** 客户端发起：单人直接本地扫；多人发请求给服务端。 */
-    public static void requestHeatmap(String dim, int cx, int cz, int half) {
-        PanelState.heatRequestSentMs = System.currentTimeMillis();
-        PanelState.heatNoServer = false;
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.getSingleplayerServer() != null) {
-            // 单人：后台线程直接扫本地存档，不走网络
-            Thread t = new Thread(() -> {
-                try {
-                    ScanResult r = scanRegions(mc.getSingleplayerServer(), dim, cx, cz, half);
-                    PanelState.heat = r.toData(dim, cx, cz, half);
-                } catch (Throwable e) {
-                    PanelState.log(PanelState.Level.WARN, "热力图扫描失败: " + e);
-                }
-            }, "ChunkSmithPanel-Heatmap-SP");
-            t.setDaemon(true);
-            t.start();
-            return;
-        }
-        try {
-            CHANNEL.sendToServer(new HeatmapC2S(dim, cx, cz, half));
-        } catch (Throwable t) {
-            PanelState.heatNoServer = true;
-            PanelState.log(PanelState.Level.WARN, "服务器未安装面板模组服务端部分，热力图需要服务端支持。");
-        }
-    }
+    // 客户端主动发起的那两个方法（requestHandshake / requestHeatmap）在 NetClient 里。
+    // 它们要用 net.minecraft.client.Minecraft，属于客户端专属代码，绝不能留在这个
+    // 服务端也会加载的公共类里——否则专用服务器验证 Net 时会去加载客户端类并以
+    // “invalid dist DEDICATED_SERVER” 报错。
 
     private static void handleHeatmap(HeatmapC2S m, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context c = ctx.get();
@@ -217,7 +190,8 @@ public final class Net {
         Thread worker = new Thread(() -> {
             try {
                 ScanResult r = scanRegions(server, m.dim, m.cx, m.cz, m.half);
-                CHANNEL.reply(new HeatmapS2C(m.dim, m.cx, m.cz, m.half, r.rx, r.rz, r.bits), c);
+                if (sp.hasDisconnected() || sp.getServer() != server) return;
+                CHANNEL.reply(new HeatmapS2C(m.requestId, m.dim, m.cx, m.cz, m.half, r.rx, r.rz, r.bits), c);
             } catch (Throwable ignored) {
             }
         }, "ChunkSmithPanel-Heatmap");
@@ -229,6 +203,7 @@ public final class Net {
     private static void handleHeatmapResp(HeatmapS2C m, Supplier<NetworkEvent.Context> ctx) {
         NetworkEvent.Context c = ctx.get();
         c.enqueueWork(() -> {
+            if (m.requestId != PanelState.heatRequestId) return;
             Set<Long> set = new HashSet<>();
             for (int i = 0; i < m.regions; i++) {
                 byte[] bits = m.bits[i];
@@ -270,16 +245,21 @@ public final class Net {
         }
     }
 
-    /** 找到维度对应的存档目录（按原版命名惯例回退尝试）。 */
+    /** 找到维度对应的存档目录，兼容 1.20 的 dimensions/ 路径和旧版回退路径。 */
     static Path dimensionRoot(MinecraftServer server, String dim) {
         Path root = server.getWorldPath(LevelResource.ROOT);
-        String d = dim.toLowerCase(Locale.ROOT);
-        if (d.endsWith(":overworld") || d.equals("minecraft:overworld")) return root;
-        if (d.endsWith(":the_nether")) return root.resolve("DIM-1");
-        if (d.endsWith(":the_end")) return root.resolve("DIM1");
+        String d = dim == null ? "minecraft:overworld" : dim.toLowerCase(Locale.ROOT);
+        if (d.equals("minecraft:overworld") || d.endsWith(":overworld")) return root;
+        if (d.equals("minecraft:the_nether") || d.endsWith(":the_nether")) return root.resolve("DIM-1");
+        if (d.equals("minecraft:the_end") || d.endsWith(":the_end")) return root.resolve("DIM1");
         int colon = d.indexOf(':');
-        if (colon >= 0) return root.resolve("DIM_" + d.substring(0, colon) + "_" + d.substring(colon + 1));
-        return root.resolve("DIM_" + d);
+        String namespace = colon >= 0 ? d.substring(0, colon) : "minecraft";
+        String path = colon >= 0 ? d.substring(colon + 1) : d;
+        Path modern = root.resolve("dimensions").resolve(namespace).resolve(path);
+        if (Files.isDirectory(modern.resolve("region")) || !Files.exists(root.resolve("DIM_" + namespace + "_" + path))) {
+            return modern;
+        }
+        return root.resolve("DIM_" + namespace + "_" + path);
     }
 
     static ScanResult scanRegions(MinecraftServer server, String dim, int cx, int cz, int half) {

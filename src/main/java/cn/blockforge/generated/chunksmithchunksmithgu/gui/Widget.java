@@ -749,8 +749,18 @@ public abstract class Widget {
             g.drawString(f, info, x + 4, y + h - 12, Theme.TEXT_LIGHT, false);
         }
 
-        private void rebuild(cn.blockforge.generated.chunksmithchunksmithgu.PanelState.HeatData heat) {
+        private long visualKey(cn.blockforge.generated.chunksmithchunksmithgu.PanelState.HeatData heat) {
             long key = heat.receivedMs;
+            key = 31 * key + Double.doubleToLongBits(scx);
+            key = 31 * key + Double.doubleToLongBits(scz);
+            key = 31 * key + cn.blockforge.generated.chunksmithchunksmithgu.PanelState.shape.hashCode();
+            key = 31 * key + cn.blockforge.generated.chunksmithchunksmithgu.PanelState.radius;
+            key = 31 * key + cn.blockforge.generated.chunksmithchunksmithgu.PanelState.radius2;
+            return key;
+        }
+
+        private void rebuild(cn.blockforge.generated.chunksmithchunksmithgu.PanelState.HeatData heat) {
+            long key = visualKey(heat);
             if (cache != null && cacheHalf == half && cacheKey == key) return;
             int span = 2 * half + 1;
             int n = Math.min(span, 224);           // 位图分辨率上限，防卡
