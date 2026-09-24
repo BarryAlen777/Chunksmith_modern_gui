@@ -991,6 +991,19 @@ public class PanelScreen extends Screen {
         };
         widgets.add(open);
 
+        // ---- 关于：作者与开源地址 ----
+        widgets.add(new Widget.Label(28, 336, "作者 BarryAlen777", false));
+        Widget.Button repo = new Widget.Button(150, 330, 158, 18, "打开开源项目");
+        repo.stone = true;
+        repo.onPress = () -> {
+            try {
+                Util.getPlatform().openUri("https://github.com/BarryAlen777/Chunksmith_modern_gui");
+            } catch (Throwable t) {
+                toast("打不开链接：" + t.getMessage());
+            }
+        };
+        widgets.add(repo);
+
         int xR = 340, wR = VW - 28 - xR;
         widgets.add(new Widget.Label(xR, 76, "/cs set 改动备份（可回滚）", true));
         setsTa = new Widget.ScrollText(xR, 94, wR, 176);

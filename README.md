@@ -1,30 +1,23 @@
-# Chunksmith_modern_gui
-为Chunksmith模组制作的现代化gui界面
+# Chunksmith modern gui
 
-## ✨介绍
-本模组为 Chunksmith 添加一套全新现代化图形操作界面，不用记忆复杂指令，可视化操作区块相关功能。
+为 [Chunksmith](https://github.com/BarryAlen777/Chunksmith_modern_gui) 前置模组提供的现代化图形面板
+（Minecraft 1.20.1 + Forge）。
 
-- 可视化控制面板
-- 快捷键支持
-- 参数快速配置面板
-- 适配 Forge 1.20.1
+- **作者**：BarryAlen777
+- **开源地址**：https://github.com/BarryAlen777/Chunksmith_modern_gui
+- **许可证**：MIT（见 [LICENSE](LICENSE)）
 
-## 📦环境要求
-- Minecraft：1.20.1
-- Mod加载器：Forge
-- 前置模组：Chunksmith
+## 安装
 
-## 📥安装方式
-1. 安装对应版本 Forge
-2. 将本模组 jar 文件放入 mods 文件夹
-3. 同时安装前置模组 Chunksmith
-4. 启动游戏
+1. 确认游戏是 **Minecraft 1.20.1 + Forge 47.x**。
+2. 把 `chunksmith_modern_gui-*.jar` 放进 `.minecraft/mods` 文件夹。
+3. 同时安装 Chunksmith 前置模组（服务端也需要装）。
+4. 进游戏按 **P** 打开指令面板。
 
-## 🎮使用说明
-- 按下快捷键打开GUI面板
-- 在面板内调整区块相关参数
-- 支持指令与GUI两种操作方式
+## 构建
 
-## 🔧开发
-本项目开源源代码托管于本仓库。
-开发者可以直接克隆本仓库，使用 IDEA 导入 Gradle 项目进行编译。
+```bash
+./gradlew build
+```
+
+产物在 `build/libs/` 下。
