@@ -42,4 +42,8 @@ ChunkSmith GUI 是一款专为 Chunksmith 区块预生成模组 开发的可视�
 适用人群
 适合所有使用 Chunksmith 进行区块预生成的单机玩家、整合包制作者、MC服务器服主，专为觉得指令操作繁琐、想要更便捷可视化管理区块生成任务的用户打造。
 
-下载地址：https://www.curseforge.com/minecraft/mc-mods/chunksmith-modern-gui
+相关链接：
+
+Curseforge：https://www.curseforge.com/minecraft/mc-mods/chunksmith-modern-gui
+
+MC百科：https://www.mcmod.cn/class/31060.html
