@@ -2,6 +2,7 @@ package cn.blockforge.generated.chunksmithchunksmithgu.net;
 
 import cn.blockforge.generated.chunksmithchunksmithgu.PanelState;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.Connection;
 
 /**
  * 客户端专用的网络入口：只有面板界面会调用这两个方法。
@@ -19,9 +20,24 @@ public final class NetClient {
     private NetClient() {
     }
 
-    /** 面板打开时向服务端问一次前置/世界信息（服务端没装模组则静默失败）。 */
+    /** 服务端连接上是否装了我们这条通道（ vanilla/未安装 时为 false）。 */
+    private static boolean serverHasChannel() {
+        try {
+            Connection con = Minecraft.getInstance().getConnection() == null
+                    ? null : Minecraft.getInstance().getConnection().getConnection();
+            return con != null && Net.CHANNEL.isRemotePresent(con);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 面板打开时向服务端问一次前置/世界信息（服务端没装模组则静默跳过）。 */
     public static void requestHandshake() {
         try {
+            if (!serverHasChannel()) {
+                Net.serverWorlds = null;
+                return;
+            }
             Net.CHANNEL.sendToServer(new Net.HandshakeC2S());
         } catch (Throwable t) {
             Net.serverWorlds = null;
@@ -48,16 +64,23 @@ public final class NetClient {
                         PanelState.log(PanelState.Level.WARN, "热力图扫描失败: " + e);
                     }
                 }
-            }, "ChunkSmithPanel-Heatmap-SP");
+            }, "ChunksmithPanel-Heatmap-SP");
             t.setDaemon(true);
             t.start();
+            return;
+        }
+        // 多人：Forge 对未安装的通道不会抛异常，而是静默丢包 —— 必须主动探测，
+        // 否则面板会永远停在“请求中”。探测不到就直接给出可读提示。
+        if (!serverHasChannel()) {
+            PanelState.heatNoServer = true;
+            PanelState.log(PanelState.Level.WARN, "服务器未安装面板模组服务端部分，热力图需要服务端支持。");
             return;
         }
         try {
             Net.CHANNEL.sendToServer(new Net.HeatmapC2S(requestId, dim, cx, cz, half));
         } catch (Throwable t) {
             PanelState.heatNoServer = true;
-            PanelState.log(PanelState.Level.WARN, "服务器未安装面板模组服务端部分，热力图需要服务端支持。");
+            PanelState.log(PanelState.Level.WARN, "热力图请求发送失败: " + t);
         }
     }
 }

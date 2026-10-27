@@ -1,5 +1,6 @@
 package cn.blockforge.generated.chunksmithchunksmithgu.gui;
 
+import cn.blockforge.generated.chunksmithchunksmithgu.ChunkSmithGuiMod;
 import cn.blockforge.generated.chunksmithchunksmithgu.ChunkSmithGuiPaths;
 import cn.blockforge.generated.chunksmithchunksmithgu.CommandBuilder;
 import cn.blockforge.generated.chunksmithchunksmithgu.CommandRunner;
@@ -64,21 +65,36 @@ public class PanelScreen extends Screen {
 
     // 生成页
     private Widget.TextArea previewTa;
-    private boolean manualPreview = false;
+    /**
+     * 手动编辑过的预览行；null = 跟随表单自动生成。
+     * 存在面板实例上而不是 TextArea 上，切到别的标签页再回来（包括任务页的“开始生成”）
+     * 执行的都是同一套命令，不会静默回退成自动预览。
+     */
+    private List<String> manualPreviewLines = null;
+    /** 上次“手动预览模式”发出指令的时间：连点保护用。 */
+    private long lastManualSendMs = 0;
+    private Widget.Label previewLb;
+    private Widget.Button restoreBtn;
 
     // 任务页
     private Widget.ScrollText taskStatus;
 
     // 清理页
     private Widget.ScrollText trimTa;
+    private Widget.Toggle trimConfirmToggle;
+    private Widget.Button trimRunBtn;
+    private Widget.Button trimCancelBtn;
 
     // 热力图页
     private Widget.HeatCanvas canvas;
+    private Widget.Button heatPullBtn;
     private final List<String> dims = new ArrayList<>();
     private final List<String> dimNames = new ArrayList<>();
     private String heatDim = "minecraft:overworld";
     private int heatHalf = 128;
     private Widget.Label heatHalfLb;
+    /** 上次握手回传的世界列表引用；变了就说明要重建维度下拉。 */
+    private List<String> shownWorlds = null;
 
     // 日志页
     private Widget.ScrollText logTa;
@@ -106,9 +122,18 @@ public class PanelScreen extends Screen {
     /** 面板刚打开时，用来问几次“到底有没有任务在跑”（前置会自己续跑上次的任务）。 */
     private int probeBudget = 0;
     private long nextProbeMs = 0;
+    /** 列表控件的增量刷新依据：只有对应版本变了才重建行。 */
+    private int shownLogVersion = -1;
+    private int shownSetsVersion = -1;
+    /** 任务状态行的内容签名（P2-11）：不变就不重建行列表。 */
+    private long shownTaskSig = 0L;
+    /** 上一次看到的任务状态，用来在“转为完成”的那一帧触发边缘爆闪。 */
+    private PanelState.Task lastTask = PanelState.Task.NONE;
+    /** 复用 SimpleDateFormat（原来是每帧 new 一个）。 */
+    private static final java.text.SimpleDateFormat HHMMSS = new java.text.SimpleDateFormat("HH:mm:ss");
 
     public PanelScreen() {
-        super(Component.literal("ChunkSmith 指令面板"));
+        super(Component.literal(ChunkSmithGuiMod.MOD_NAME + " 指令面板"));
     }
 
     @Override
@@ -116,6 +141,7 @@ public class PanelScreen extends Screen {
         pendingPercent = Settings.uiScalePercent;
         heatHalf = Settings.heatmapRadius;
         computeTransform();
+        PanelState.warmUpSets();   // 把上次的 /cs set 备份历史读回内存（回滚跨重启可用）
         NetClient.requestHandshake();
         buildChrome();
         buildTab();
@@ -124,6 +150,11 @@ public class PanelScreen extends Screen {
         nextProbeMs = 0;
         lastAutoRefreshMs = 0;
         PrereqStatus.refreshTree();
+    }
+
+    /** 输入框/文本区是否处于编辑状态——ClientKeys 靠它决定 P 键要不要关面板。 */
+    public boolean isInputFocused() {
+        return focus != null && focus.isEditing();
     }
 
     @Override
@@ -159,32 +190,45 @@ public class PanelScreen extends Screen {
         lastFrameMs = now;
 
         this.renderBackground(g);
-        computeTransform();
-        double vx = (mouseX - ox) / scale;
+        computeTransform();        double vx = (mouseX - ox) / scale;
         double vy = (mouseY - oy) / scale;
 
         updateDynamic();
         maybeAutoRefresh(now);
 
+        // pushPose/popPose 用 try/finally 配对：任何一个控件绘制抛异常都不会让姿势栈失衡，
+        // 否则后续整个游戏界面的变换都会错位。
         g.pose().pushPose();
-        g.pose().translate(ox, oy, 0);
-        g.pose().scale((float) scale, (float) scale, 1f);
+        try {
+            g.pose().translate(ox, oy, 0);
+            g.pose().scale((float) scale, (float) scale, 1f);
 
-        Theme.drawPanel(g, 0, 0, VW, VH, now);
-        Theme.drawTitlePlate(g, VW / 2, 0, TAB_TITLE[tab.ordinal()]);
-        drawStatusStrip(g);
+            Theme.drawPanel(g, 0, 0, VW, VH, now);
+            Theme.drawTitlePlate(g, VW / 2, 0, TAB_TITLE[tab.ordinal()]);
+            drawStatusStrip(g);
 
-        for (Widget w : chrome) if (w.visible) w.render(g, (int) vx, (int) vy, dt);
-        for (Widget w : widgets) if (w.visible) w.render(g, (int) vx, (int) vy, dt);
+            for (Widget w : chrome) if (w.visible) w.render(g, (int) vx, (int) vy, dt);
+            for (Widget w : widgets) if (w.visible) w.render(g, (int) vx, (int) vy, dt);
 
-        drawPanelExtras(g, now);
+            drawPanelExtras(g, now);
 
-        if (Settings.particles) {
-            GuiParticles.tickRender(g, 0, 0, VW, VH, PanelState.task == PanelState.Task.RUNNING, now);
+            if (Settings.particles) {
+                GuiParticles.tickRender(g, 0, 0, VW, VH, PanelState.task == PanelState.Task.RUNNING, now);
+            }
+            drawToast(g, now);
+        } finally {
+            g.pose().popPose();
         }
-        drawToast(g, now);
+    }
 
-        g.pose().popPose();
+    /**
+     * （报告 P1-10）原版 renderBackground 每帧对整个屏幕做多档半透明铺满 + 背景暗化，
+     * 面板本身是不透明的木框+羊皮纸，背景只露出四周一圈——直接改成一档深色半透明填充，
+     * 视觉几乎无差别，每帧少几十次整屏 fill 和一套模糊。
+     */
+    @Override
+    public void renderBackground(GuiGraphics g) {
+        g.fill(0, 0, this.width, this.height, 0x90000000);
     }
 
     /**
@@ -198,7 +242,7 @@ public class PanelScreen extends Screen {
             if (sec <= 0 || !PrereqStatus.prereqOk()) return;
             if (now - lastAutoRefreshMs < sec * 1000L) return;
             lastAutoRefreshMs = now;
-            CommandRunner.send(cs() + " progress");
+            CommandRunner.sendQuiet(cs() + " progress");   // 自动轮询不进日志，免得刷屏
             return;
         }
         if (PanelState.task != PanelState.Task.NONE) { probeBudget = 0; return; }
@@ -208,7 +252,7 @@ public class PanelScreen extends Screen {
         if (now < nextProbeMs) return;
         probeBudget--;
         nextProbeMs = now + 2000;
-        CommandRunner.send(cs() + " progress");
+        CommandRunner.sendQuiet(cs() + " progress");
     }
 
     /** 标签条下方的一行前置状态：就绪绿色、缺失红色、版本不符橙色。 */
@@ -216,23 +260,61 @@ public class PanelScreen extends Screen {
         Font f = Minecraft.getInstance().font;
         String s;
         int color;
-        if (PrereqStatus.localPresent()) {
-            s = "前置 " + (PrereqStatus.localModName == null ? "ChunkSmith" : PrereqStatus.localModName)
-                    + (PrereqStatus.localVersion == null ? "" : " v" + PrereqStatus.localVersion)
-                    + " · 权限 " + permText() + " · 就绪";
-            color = Theme.OK;
-        } else if (PrereqStatus.commandTreeSeen) {
-            s = "服务端已装前置（/" + cs() + " 可用）· 权限 " + permText();
-            color = Theme.OK;
+        // （报告 P2-4）状态条不再只看 localPresent()：服务端的权威信号优先。
+        boolean tree = PrereqStatus.commandTreeSeen;
+        if (PrereqStatus.serverRejected) {
+            s = "前置未就绪：服务端不认识 /" + cs() + " 指令，或服务器没装前置";
+            color = Theme.DANGER;
+        } else if (tree) {
+            if (PrereqStatus.perm == PrereqStatus.Perm.READONLY) {
+                // 命令树是按权限过滤后下发的。只读账号看不到 start/trim，
+                // 以前会笼统报“命令树里缺少 /cs start”，看着像前置装坏了。
+                s = "服务端 /" + cs() + " 可用，但你这个账号没有管理权限（开始/清理需要管理员）";
+                color = Theme.WARN;
+            } else {
+                String miss = PrereqStatus.missingSubcommands();
+                if (miss != null) {
+                    s = "服务端已装前置，但命令树里缺少：" + miss;
+                    color = Theme.WARN;
+                } else {
+                    s = "服务端 /" + cs() + " 可用 · 权限 " + permText() + " · 就绪";
+                    color = Theme.OK;
+                }
+            }
+        } else if (PrereqStatus.localPresent()) {
+            boolean single = Minecraft.getInstance().isSingleplayer();
+            if (single) {
+                s = "前置 " + (PrereqStatus.localModName == null ? "ChunkSmith" : PrereqStatus.localModName)
+                        + (PrereqStatus.localVersion == null ? "" : " v" + PrereqStatus.localVersion)
+                        + " 已装 · 权限 " + permText() + " · 就绪";
+                color = Theme.OK;
+            } else if (PrereqStatus.commandTreeSynced) {
+                // 命令树同步好了却没有 cs 节点：要么服务端没装，要么玩家没权限（树被过滤掉了）。
+                s = "服务端没有下发 /" + cs() + " 指令：服务器没装前置，或你这个账号没有管理权限";
+                color = Theme.DANGER;
+            } else {
+                s = "前置 " + (PrereqStatus.localModName == null ? "ChunkSmith" : PrereqStatus.localModName)
+                        + " 已装 · 等服务端命令树同步…";
+                color = Theme.WARN;
+            }
+        } else if (PrereqStatus.commandTreeSynced) {
+            // 同样两种可能，别一口咬定“没装前置”——非管理员看到的命令树里本来就没有 /cs。
+            s = "没看到 /" + cs() + " 指令：可能服务端没装前置，也可能你这个账号没有管理员权限";
+            color = Theme.WARN;
         } else {
             s = "未检测到 ChunkSmith 前置：把它放进 mods 文件夹；服务端已装时可勾选“忽略前置检测”";
             color = Theme.DANGER;
         }
-        if (PrereqStatus.versionMismatch()) {
+        // （报告 P2-12）版本比对结果按输入串缓存，别每帧重新解析
+        if (PrereqStatus.versionMismatchCached()) {
             s = "前置版本不一致（本地 " + PrereqStatus.localVersion + " / 服务端 " + PrereqStatus.serverVersion + "）· " + s;
             color = Theme.WARN;
         }
-        g.drawString(f, s, 24, 62, color, true);
+        if (PanelState.forceIgnoreSafety) {
+            s = "注意：已开启“跳过安全预检” · " + s;
+            color = Theme.DANGER;
+        }
+        g.drawString(f, s, 24, 62, color, false);
     }
 
     /** 底栏右侧的实时信息 + 缩放说明。 */
@@ -244,13 +326,14 @@ public class PanelScreen extends Screen {
         double fit = Math.max(0.35, Math.min((width - 8) / (double) VW, (height - 8) / (double) VH));
         double real = Math.min(Math.max(0.4, pendingPercent / 100.0), fit);
         if (scaleInfoLb != null) {
-            scaleInfoLb.text = Math.round(real * 100) + "%  ·  "
+            scaleInfoLb.text = Math.round(real * 100) + "%·"
                     + Math.round(VW * real) + "×" + Math.round(VH * real);
         }
 
         long usedMb = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024L * 1024L);
-        g.drawString(f, "FPS " + mc.getFps(), 368, by + 4, Theme.INK_SOFT, false);
-        g.drawString(f, "内存 " + usedMb + "MB", 416, by + 4, Theme.INK_SOFT, false);
+        // FPS/内存文本放在缩放信息文本（约到 x=350）之后、按钮组（x=528）之前，大缩放下也不重叠
+        g.drawString(f, "FPS " + mc.getFps(), 392, by + 4, Theme.INK_SOFT, false);
+        g.drawString(f, "内存 " + usedMb + "MB", 448, by + 4, Theme.INK_SOFT, false);
     }
 
     private void drawToast(GuiGraphics g, long now) {
@@ -327,9 +410,15 @@ public class PanelScreen extends Screen {
 
     @Override
     public boolean keyPressed(int key, int scan, int mods) {
+        // （报告 P1-3）控件自己退出编辑（文本区按 Esc 结束单行编辑等）后，
+        // focus 还指着它。不清理的话下面的"一律吞掉"会吃掉所有后续按键，键盘像卡死。
+        if (focus != null && !focus.isEditing()) clearFocus();
         if (focus != null) {
             if (focus.keyPressed(key, scan, mods)) return true;
             if (key == GLFW.GLFW_KEY_ESCAPE) { clearFocus(); return true; }
+            // 输入框聚焦时其它按键一律吞掉：原版 Screen 会拿 E 去开背包并顺手 onClose()，
+            // 那会让用户在世界名里打字母 E 时面板直接消失、输入丢失。
+            return true;
         }
         return super.keyPressed(key, scan, mods);
     }
@@ -462,7 +551,7 @@ public class PanelScreen extends Screen {
             boolean sel = PanelScreen.this.tab == target;
             Theme.buttonFace(g, x, y, w, h, contains(mx, my), sel, true, false);
             Font f = Minecraft.getInstance().font;
-            g.drawString(f, text, x + (w - f.width(text)) / 2, y + (h - 8) / 2, sel ? Theme.INK : Theme.LABEL, true);
+            g.drawString(f, text, x + (w - f.width(text)) / 2, y + (h - 8) / 2, sel ? Theme.INK : Theme.LABEL, false);
             if (sel) g.fill(x + 3, y + h - 2, x + w - 3, y + h - 1, Theme.GOLD);
         }
 
@@ -482,10 +571,20 @@ public class PanelScreen extends Screen {
     private void buildTab() {
         widgets.clear();
         focus = null;
+        // 控件是新建的，强制 updateDynamic 重新灌入行列表
+        shownLogVersion = -1;
+        shownSetsVersion = -1;
+        shownTaskSig = Long.MIN_VALUE;
         previewTa = null;
+        previewLb = null;
+        restoreBtn = null;
         taskStatus = null;
         trimTa = null;
+        trimConfirmToggle = null;
+        trimRunBtn = null;
+        trimCancelBtn = null;
         canvas = null;
+        heatPullBtn = null;
         heatHalfLb = null;
         logTa = null;
         setsTa = null;
@@ -503,45 +602,46 @@ public class PanelScreen extends Screen {
 
     // ---- 生成页 ----
     private void buildGenerate() {
-        manualPreview = false;
         int xL = 28, wL = 300;
         int y = 76;
 
         widgets.add(new Widget.Label(xL, y, "世界名（/cs world）", false));
         Widget.Field wf = Widget.Field.str(xL, y + 11, wL, 16, PanelState.world);
-        wf.onChanged = () -> { PanelState.world = wf.value; refreshPreview(); };
+        wf.onChanged = () -> { PanelState.world = wf.value; onGenParamChange(); };
         widgets.add(wf);
 
         y += 34;
         widgets.add(new Widget.Label(xL, y, "形状", false));
         Widget.Cycle shape = new Widget.Cycle(xL, y + 11, wL, 16, "",
                 SHAPES, SHAPE_NAMES, Math.max(0, SHAPES.indexOf(PanelState.shape)));
-        shape.onChange = i -> { PanelState.shape = shape.value(); refreshPreview(); };
+        shape.onChange = i -> { PanelState.shape = shape.value(); onGenParamChange(); };
         widgets.add(shape);
 
         y += 34;
         widgets.add(new Widget.Label(xL, y, "中心模式", false));
         Widget.Cycle center = new Widget.Cycle(xL, y + 11, wL, 16, "",
                 CENTERS, CENTER_NAMES, Math.max(0, CENTERS.indexOf(PanelState.centerMode)));
-        center.onChange = i -> { PanelState.centerMode = center.value(); refreshPreview(); };
+        center.onChange = i -> { PanelState.centerMode = center.value(); onGenParamChange(); };
         widgets.add(center);
 
         y += 34;
         widgets.add(new Widget.Label(xL, y, "中心坐标 X / Z（指定坐标时生效）", false));
+        // （报告 P1-9）输入非法时把状态写成越界哨兵而不是保留旧值：
+        // 红框 + 校验拦截，不会出现"框里显示空、实际按 500 执行"的表里不一。
         Widget.Field xf = Widget.Field.num(xL, y + 11, 146, 16, PanelState.centerX, -30000000, 30000000);
-        xf.onChanged = () -> { PanelState.centerX = (int) xf.longValue(); refreshPreview(); };
+        xf.onChanged = () -> { PanelState.centerX = xf.valid() ? (int) xf.longValue() : 30_000_001; onGenParamChange(); };
         widgets.add(xf);
         Widget.Field zf = Widget.Field.num(xL + 154, y + 11, 146, 16, PanelState.centerZ, -30000000, 30000000);
-        zf.onChanged = () -> { PanelState.centerZ = (int) zf.longValue(); refreshPreview(); };
+        zf.onChanged = () -> { PanelState.centerZ = zf.valid() ? (int) zf.longValue() : 30_000_001; onGenParamChange(); };
         widgets.add(zf);
 
         y += 34;
-        widgets.add(new Widget.Label(xL, y, "主半径 / 第二半径（区块，星形与椭圆用得上）", false));
+        widgets.add(new Widget.Label(xL, y, "主半径 / 第二半径（区块，星形必填、椭圆选填）", false));
         Widget.Field rf = Widget.Field.num(xL, y + 11, 146, 16, PanelState.radius, 1, 1000000);
-        rf.onChanged = () -> { PanelState.radius = (int) rf.longValue(); refreshPreview(); };
+        rf.onChanged = () -> { PanelState.radius = rf.valid() ? (int) rf.longValue() : 0; onGenParamChange(); };
         widgets.add(rf);
         Widget.Field r2 = Widget.Field.num(xL + 154, y + 11, 146, 16, PanelState.radius2, 0, 1000000);
-        r2.onChanged = () -> { PanelState.radius2 = (int) r2.longValue(); refreshPreview(); };
+        r2.onChanged = () -> { PanelState.radius2 = r2.valid() ? (int) r2.longValue() : -1; onGenParamChange(); };
         widgets.add(r2);
 
         y += 34;
@@ -551,12 +651,35 @@ public class PanelScreen extends Screen {
         Widget.Toggle particles = new Widget.Toggle(xL + 198, y, 102, 16, "运行粒子", Settings.particles);
         particles.onChange = b -> { Settings.particles = b; Settings.save(); };
         widgets.add(particles);
+        // （报告 P1-4）“跳过安全预检”是独立的第二个开关：只管权限预检与预览参数安全网。
+        // 和“忽略前置检测”分开，用户为了绕过前置误报时不会顺带废掉安全检查。
+        y += 22;
+        Widget.Toggle safety = new Widget.Toggle(xL, y, 210, 16, "高级：跳过安全预检", PanelState.forceIgnoreSafety);
+        safety.onChange = b -> {
+            PanelState.forceIgnoreSafety = b;
+            if (b) PanelState.log(PanelState.Level.WARN,
+                    "已开启“跳过安全预检”：权限预检与预览参数检查被绕过，发指令前请自己确认无误。");
+        };
+        if (PanelState.forceIgnoreSafety) safety.textColor = Theme.DANGER;
+        widgets.add(safety);
+        // 说明文字改到开关正下方独占一行：原来挂在开关右边（x=246）会压到右侧命令预览区，
+        // 而且后添加的预览控件还会把它盖住，字看起来“糊在别人的框上”。
+        Widget.Label safetyHint = new Widget.Label(xL, y + 20, "仅在你确定面板误判了你的权限/命令时使用", false);
+        safetyHint.colorOverride = Theme.INK_SOFT;
+        widgets.add(safetyHint);
 
         int xR = 344, wR = VW - 28 - xR;
-        widgets.add(new Widget.Label(xR, 76, "命令预览（点某行可改，执行的就是它）", false));
+        previewLb = new Widget.Label(xR, 76, previewCaption(), false);
+        widgets.add(previewLb);
         previewTa = new Widget.TextArea(xR, 88, wR, 190);
-        previewTa.onEdited = ls -> manualPreview = true;
-        refreshPreview();
+        previewTa.onEdited = ls -> {
+            manualPreviewLines = new ArrayList<>(ls);
+            if (previewLb != null) previewLb.text = previewCaption();
+            if (restoreBtn != null) restoreBtn.active = true;
+        };
+        // 恢复跟随表单时同步一次当前内容
+        if (manualPreviewLines != null) previewTa.setLines(manualPreviewLines);
+        else refreshPreview();
         widgets.add(previewTa);
 
         Widget.Button start = new Widget.Button(xR, 286, wR, 22, "开始生成");
@@ -564,15 +687,15 @@ public class PanelScreen extends Screen {
         start.onPress = this::doStart;
         widgets.add(start);
 
-        int half = (wR - 6) / 2;
-        Widget.Button copy = new Widget.Button(xR, 314, half, 18, "复制命令");
+        int third = (wR - 12) / 3;
+        Widget.Button copy = new Widget.Button(xR, 314, third, 18, "复制命令");
         copy.iconPath = Icons.COPY;
         copy.onPress = () -> {
-            CommandRunner.copy(previewTa == null ? CommandBuilder.buildPreview() : previewTa.join());
+            CommandRunner.copy(String.join("\n", effectivePreviewLines()));
             toast("命令已复制到剪贴板");
         };
         widgets.add(copy);
-        Widget.Button reset = new Widget.Button(xR + half + 6, 314, half, 18, "重置表单");
+        Widget.Button reset = new Widget.Button(xR + third + 6, 314, third, 18, "重置表单");
         reset.stone = true;
         reset.onPress = () -> {
             PanelState.world = "world";
@@ -582,40 +705,133 @@ public class PanelScreen extends Screen {
             PanelState.centerZ = 0;
             PanelState.radius = 500;
             PanelState.radius2 = 0;
-            switchTab(Tab.TASK);
-            switchTab(Tab.GENERATE);
+            manualPreviewLines = null;
+            buildTab();     // 直接重建当前页即可，不用绕道任务页
             toast("表单已重置为默认值");
         };
         widgets.add(reset);
+        restoreBtn = new Widget.Button(xR + 2 * (third + 6), 314, third, 18, "恢复自动预览");
+        restoreBtn.stone = true;
+        restoreBtn.active = manualPreviewLines != null;
+        restoreBtn.onPress = () -> {
+            manualPreviewLines = null;
+            refreshPreview();
+            if (previewLb != null) previewLb.text = previewCaption();
+            restoreBtn.active = false;
+            toast("预览已恢复为跟随表单");
+        };
+        widgets.add(restoreBtn);
     }
 
-    /** 预览是自动跟随表单的；用户手动改过就不覆盖。 */
+    private String previewCaption() {
+        return manualPreviewLines == null
+                ? "命令预览（点某行可改，执行的就是它）"
+                : "命令预览（已手动编辑，执行的就是它）";
+    }
+
+    /**
+     * 预览是自动跟随表单的；用户手动改过就不覆盖。
+     * 手动内容存在 {@link #manualPreviewLines}，不随标签页销毁。
+     */
     private void refreshPreview() {
-        if (previewTa == null || manualPreview) return;
+        if (manualPreviewLines != null) return;
+        if (previewTa == null) return;
         previewTa.setLines(Arrays.asList(CommandBuilder.buildPreview().split("\n")));
     }
 
+    /**
+     * 生成页任何一个参数变了：刷新预览，并作废还在等第二阶段的那次启动。
+     *
+     * <p>以前只有清理页会这么做。点完“开始生成”再改半径/中心，3 秒后照样按旧的范围
+     * 补发 {@code /cs start}，用户以为改动生效了，其实跑的是上一次的选择。
+     * 清理和生成现在对称：改了参数就中止待发的那条危险指令。</p>
+     */
+    private void onGenParamChange() {
+        refreshPreview();
+        if (CommandRunner.isStartPending()) {
+            CommandRunner.cancelStartPending("生成参数已改动，重新点“开始生成”");
+            toast("参数改过了，这次启动已取消，请重新点“开始生成”");
+        }
+    }
+
+    /** 当前要执行的命令行：手动编辑过的预览优先，否则用表单生成的。 */
+    private List<String> effectivePreviewLines() {
+        if (manualPreviewLines != null) return CommandBuilder.parsePreviewLines(String.join("\n", manualPreviewLines));
+        return CommandBuilder.buildSequence();
+    }
+
     private void doStart() {
-        List<String> problems = CommandBuilder.validate();
-        if (!problems.isEmpty()) {
-            toast("参数有误：" + problems.get(0));
-            PanelState.log(PanelState.Level.WARN, "表单校验未通过：" + String.join("；", problems));
+        if (CommandRunner.isStartPending() || CommandRunner.isTrimPending()) {
+            toast("上一条两阶段指令还在等服务端确认，稍等一下再点");
             return;
+        }
+        if (manualPreviewLines == null) {
+            // 跟随表单：校验表单本身（报告 P1-8：手动预览模式不再拿无关表单字段卡人）
+            List<String> problems = CommandBuilder.validate();
+            if (!problems.isEmpty()) {
+                toast("参数有误：" + problems.get(0));
+                PanelState.log(PanelState.Level.WARN, "表单校验未通过：" + String.join("；", problems));
+                return;
+            }
         }
         if (!PrereqStatus.prereqOk() && !PanelState.forceIgnorePrereq) {
-            toast("没检测到 ChunkSmith 前置，请先安装或勾选“忽略前置检测”");
+            // 命令树是按权限过滤后下发的：非管理员（非 OP）看到的树里根本没有 /cs 节点，
+            // 以前这种情况一律报“没检测到前置，请先安装”，把人往装模组的方向带。
+            // 现在把两种可能都说清楚，并给出继续试的开关。
+            if (PrereqStatus.commandTreeSynced && !PrereqStatus.commandTreeSeen) {
+                toast("服务端没下发 /cs 指令：可能没装前置，也可能你这个账号没有管理员权限；确认无误可勾选“忽略前置检测”");
+            } else {
+                toast("没检测到 ChunkSmith 前置，请先安装；确已安装可勾选“忽略前置检测”");
+            }
             return;
         }
-        if (!PrereqStatus.isOperator() && !PanelState.forceIgnorePrereq && !Minecraft.getInstance().isSingleplayer()) {
-            toast("当前权限不足（需要管理员），或勾选“忽略前置检测”再试");
+        if (!PrereqStatus.isOperator() && !PanelState.forceIgnoreSafety) {
+            toast("当前权限不足（需要管理员）。确认自己是管理端的话，可在生成页勾选独立的“跳过安全预检”");
             return;
         }
-        List<String> lines = CommandBuilder.parsePreviewLines(
-                previewTa == null ? CommandBuilder.buildPreview() : previewTa.join());
+        List<String> lines = effectivePreviewLines();
         if (lines.isEmpty()) {
             toast("命令预览是空的");
             return;
         }
+        // 命令树检查（归“忽略前置检测”管）
+        String missing = PrereqStatus.missingSubcommands();
+        if (missing != null && !PanelState.forceIgnorePrereq) {
+            toast("服务端命令树里缺少：" + missing);
+            PanelState.log(PanelState.Level.WARN, "服务端命令树里缺少：" + missing);
+            return;
+        }
+        // 安全网：每一行都必须属于前置根命令，且 world/radius/center/pattern 参数在范围内
+        // （报告 P1-8：手动预览现在过的也是这套参数级检查，不再只查前缀）。
+        // 这是安全检查，只能由配置页的“跳过安全预检”独立开关放弃（报告 P1-4）。
+        String bad = CommandBuilder.previewSanityCheck(lines);
+        if (bad != null) {
+            if (!PanelState.forceIgnoreSafety) {
+                toast(bad);
+                PanelState.log(PanelState.Level.WARN, bad);
+                return;
+            }
+            PanelState.log(PanelState.Level.WARN, "已跳过安全预检，直接发送：" + bad);
+        }
+        if (manualPreviewLines == null) {
+            // 两阶段启动（报告 P1-6）：先发范围设置，服务端没报错才自动补发 start，
+            // 避免 world/center/radius 被拒后 start 按旧选择悄悄跑起来。
+            if (!CommandRunner.beginStartSequence(CommandBuilder.buildSelection(), CommandBuilder.startCommand())) {
+                toast("上一条两阶段指令还在等服务端确认，稍等一下");
+                return;
+            }
+            toast("正在设置范围，3 秒内未被拒绝会自动开始生成；如有报错会中止");
+            return;
+        }
+        // 手动编辑过的预览行数与次序由用户自己排，按原样连发。
+        // 手动模式没有“等第二阶段”这个挂账，连点两下就会真的发两遍，所以这里补一个
+        // 1.2 秒的连点保护（表单模式由 pendingStart 挡住重复点击）。
+        long now = System.currentTimeMillis();
+        if (now - lastManualSendMs < 1200) {
+            toast("刚发过一遍，稍等一下再点（避免连点重复发送）");
+            return;
+        }
+        lastManualSendMs = now;
         CommandRunner.sendSequence(lines);
         toast("已发送 " + lines.size() + " 条指令");
     }
@@ -711,62 +927,82 @@ public class PanelScreen extends Screen {
         int y = 108;
         widgets.add(new Widget.Label(x0, y, "世界名", false));
         Widget.Field wf = Widget.Field.str(x0, y + 11, w0, 16, PanelState.world);
-        wf.onChanged = () -> { PanelState.world = wf.value; rebuildTrimPreview(); };
+        wf.onChanged = () -> { PanelState.world = wf.value; onTrimParamChange(); };
         widgets.add(wf);
 
         y += 30;
         widgets.add(new Widget.Label(x0, y, "按什么形状清理", false));
         Widget.Cycle shape = new Widget.Cycle(x0, y + 11, w0, 16, "",
                 SHAPES, SHAPE_NAMES, Math.max(0, SHAPES.indexOf(PanelState.shape)));
-        shape.onChange = i -> { PanelState.shape = shape.value(); rebuildTrimPreview(); };
+        shape.onChange = i -> { PanelState.shape = shape.value(); onTrimParamChange(); };
         widgets.add(shape);
 
         y += 30;
         widgets.add(new Widget.Label(x0, y, "保留范围的中心（范围以内保留）", false));
         Widget.Cycle center = new Widget.Cycle(x0, y + 11, w0, 16, "",
                 CENTERS, CENTER_NAMES, Math.max(0, CENTERS.indexOf(PanelState.centerMode)));
-        center.onChange = i -> { PanelState.centerMode = center.value(); rebuildTrimPreview(); };
+        center.onChange = i -> { PanelState.centerMode = center.value(); onTrimParamChange(); };
         widgets.add(center);
 
         y += 30;
         widgets.add(new Widget.Label(x0, y, "中心坐标 X / Z（选“指定坐标”时生效）", false));
         Widget.Field xf = Widget.Field.num(x0, y + 11, 146, 16, PanelState.centerX, -30000000, 30000000);
-        xf.onChanged = () -> { PanelState.centerX = (int) xf.longValue(); rebuildTrimPreview(); };
+        xf.onChanged = () -> { PanelState.centerX = xf.valid() ? (int) xf.longValue() : 30_000_001; onTrimParamChange(); };
         widgets.add(xf);
         Widget.Field zf = Widget.Field.num(x0 + 154, y + 11, 146, 16, PanelState.centerZ, -30000000, 30000000);
-        zf.onChanged = () -> { PanelState.centerZ = (int) zf.longValue(); rebuildTrimPreview(); };
+        zf.onChanged = () -> { PanelState.centerZ = zf.valid() ? (int) zf.longValue() : 30_000_001; onTrimParamChange(); };
         widgets.add(zf);
 
         y += 30;
-        widgets.add(new Widget.Label(x0, y, "保留半径（区块）", false));
-        Widget.Field rf = Widget.Field.num(x0, y + 11, w0, 16, PanelState.radius, 1, 1000000);
-        rf.onChanged = () -> { PanelState.radius = (int) rf.longValue(); rebuildTrimPreview(); };
+        // （报告 P1-1/P1-2）清理与生成对同一形状用同一套半径语义：
+        // 星形必填、椭圆选填；buildTrimSelection() 通过 radiusLine() 一并发给服务端。
+        widgets.add(new Widget.Label(x0, y, "保留半径 / 第二半径（区块，星形必填、椭圆选填）", false));
+        Widget.Field rf = Widget.Field.num(x0, y + 11, 146, 16, PanelState.radius, 1, 1000000);
+        rf.onChanged = () -> { PanelState.radius = rf.valid() ? (int) rf.longValue() : 0; onTrimParamChange(); };
         widgets.add(rf);
+        Widget.Field r2 = Widget.Field.num(x0 + 154, y + 11, 146, 16, PanelState.radius2, 0, 1000000);
+        r2.onChanged = () -> { PanelState.radius2 = r2.valid() ? (int) r2.longValue() : -1; onTrimParamChange(); };
+        widgets.add(r2);
 
         y += 32;
         Widget.Toggle confirm = new Widget.Toggle(x0, y, 300, 16, "我确认要清理", PanelState.trimConfirmed);
         widgets.add(confirm);
+        trimConfirmToggle = confirm;
 
         y += 24;
         Widget.Button run = new Widget.Button(x0, y, 300, 22, "执行清理");
         run.iconPath = Icons.TRIM;
         run.textColor = Theme.DANGER;
-        run.active = PanelState.trimConfirmed;
-        confirm.onChange = b -> { PanelState.trimConfirmed = b; run.active = b; };
-        run.onPress = () -> {
-            if (!PanelState.trimConfirmed) { toast("请先勾选确认"); return; }
-            if (!PrereqStatus.prereqOk() && !PanelState.forceIgnorePrereq) {
-                toast("没检测到 Chunksmith 前置");
+        run.active = PanelState.trimConfirmed && !CommandRunner.isTrimPending();
+        confirm.onChange = b -> { PanelState.trimConfirmed = b; run.active = b && !CommandRunner.isTrimPending(); };
+        run.onPress = this::doTrim;
+        widgets.add(run);
+        trimRunBtn = run;
+
+        // 发出范围设置后的那 3 秒里，"我确认要清理" 已经被作废、执行按钮也灰了，
+        // 以前只能靠改一个参数才会中止（onTrimParamChange）。给一个明确的悔棋按钮：
+        // 点错清理、或者想起世界/半径选错了，3 秒内点它就能拦下还没发出的 /cs trim。
+        y += 26;
+        Widget.Button cancelTrim = new Widget.Button(x0, y, 300, 18, "取消待执行的清理");
+        cancelTrim.stone = true;
+        cancelTrim.active = false;
+        cancelTrim.onPress = () -> {
+            if (!CommandRunner.isTrimPending()) {
+                toast("当前没有待执行的清理");
                 return;
             }
-            CommandRunner.sendSequence(CommandBuilder.buildTrim());
-            toast("已先把选择设好，再发送清理指令");
+            CommandRunner.cancelTrimPending("用户点了“取消待执行的清理”");
+            toast("已取消：这次清理不会再发出去");
         };
-        widgets.add(run);
+        widgets.add(cancelTrim);
+        trimCancelBtn = cancelTrim;
+        Widget.Label cancelHint = new Widget.Label(x0, y + 20, "只在发出范围设置后的 3 秒确认窗口内可点", false);
+        cancelHint.colorOverride = Theme.INK_SOFT;
+        widgets.add(cancelHint);
 
         int xR = 344, wR = VW - 28 - xR;
         widgets.add(new Widget.Label(xR, 76, "将要执行的指令", false));
-        Widget.Label seqNote = new Widget.Label(xR, 90, "先设好选择，最后 /cs trim 才生效", false);
+        Widget.Label seqNote = new Widget.Label(xR, 90, "先发范围设置，3 秒未被拒绝才自动补发 /cs trim", false);
         seqNote.colorOverride = Theme.INK_SOFT;
         widgets.add(seqNote);
         trimTa = new Widget.ScrollText(xR, 104, wR, 148);
@@ -781,12 +1017,83 @@ public class PanelScreen extends Screen {
         rebuildTrimPreview();
     }
 
+    /** 改了任何一个清理参数，旧的“我确认要清理”立即作废（防止带着旧勾选误删）。 */
+    private void onTrimParamChange() {
+        PanelState.trimConfirmed = false;
+        if (trimConfirmToggle != null && trimConfirmToggle.on) {
+            trimConfirmToggle.on = false;
+            trimConfirmToggle.syncLabel();
+        }
+        if (trimRunBtn != null) trimRunBtn.active = false;
+        CommandRunner.cancelTrimPending("清理参数已改动");
+        rebuildTrimPreview();
+    }
+
+    private void doTrim() {
+        if (!PanelState.trimConfirmed) { toast("请先勾选确认"); return; }
+        if (CommandRunner.isTrimPending()) { toast("上一次清理仍在等服务端确认"); return; }
+        // 破坏性操作，先过清理专用校验（报告 P1-1：不再复用生成页 validate()，
+        // 免得"星形需要第二半径"这类生成页规则拦住清理，且提示指向当前页存在的输入框）
+        List<String> problems = CommandBuilder.validateTrim();
+        if (!problems.isEmpty()) {
+            toast("参数有误：" + problems.get(0));
+            PanelState.log(PanelState.Level.WARN, "清理校验未通过：" + String.join("；", problems));
+            return;
+        }
+        if (!PrereqStatus.prereqOk() && !PanelState.forceIgnorePrereq) {
+            if (PrereqStatus.commandTreeSynced && !PrereqStatus.commandTreeSeen) {
+                toast("服务端没下发 /cs 指令：可能没装前置，也可能你这个账号没有管理员权限；确认无误可勾选“忽略前置检测”");
+            } else {
+                toast("没检测到 Chunksmith 前置");
+            }
+            return;
+        }
+        // 权限预检先做：命令树是按权限过滤的，非管理员根本看不到 /cs start、/cs trim，
+        // 以前先查“缺少子命令”会让人看到“服务端命令树里缺少：/cs start”，
+        // 明明是没权限，却像前置装坏了。这是安全检查，只能由"跳过安全预检"绕过（报告 P1-4）。
+        if (!PrereqStatus.isOperator() && !PanelState.forceIgnoreSafety) {
+            toast("当前权限不足（需要管理员）。若确认自己是管理端，可在生成页勾选独立的“跳过安全预检”。");
+            PanelState.log(PanelState.Level.WARN, "权限预检未通过，清理已阻止。");
+            return;
+        }
+        // 命令树检查：归"忽略前置检测"管（前置误报时可绕），但绕开要给明确警告（报告 P1-4）。
+        // 清理只看 world / trim / radius / center——不拿生成页的 start 卡人。
+        if (!PanelState.forceIgnorePrereq) {
+            String missing = PrereqStatus.missingSubcommandsForTrim();
+            if (missing != null) {
+                toast("服务端命令树里缺少：" + missing);
+                return;
+            }
+        } else if (PrereqStatus.commandTreeSeen) {
+            PanelState.log(PanelState.Level.WARN, "已勾选忽略前置检测：跳过了命令树对 trim 的检查，服务端若不支持会自行拒绝。");
+        }
+        // 两阶段：先发范围设置，服务端没报错才自动补发 /cs trim
+        if (!CommandRunner.beginTrimSequence(CommandBuilder.buildTrimSelection())) {
+            toast("上一次操作仍在等待服务端确认，请稍候");
+            return;
+        }
+        toast("正在设置范围，3 秒内未被拒绝才自动发送清理；点错可点「取消待执行的清理」拦下");
+        // 清理是破坏性操作：勾选只对这一次有效，发出去就作废。
+        // 否则 3 秒后第二阶段发出、按钮重新可用，连点两下第二次就不用再确认了。
+        // （改任何一个清理参数也会走 onTrimParamChange()，把旧勾选作废并中止第二阶段。）
+        PanelState.trimConfirmed = false;
+        if (trimConfirmToggle != null) { trimConfirmToggle.on = false; trimConfirmToggle.syncLabel(); }
+        if (trimRunBtn != null) trimRunBtn.active = false;
+    }
+
     private void rebuildTrimPreview() {
         if (trimTa == null) return;
         List<Widget.Line> out = new ArrayList<>();
-        for (String s : CommandBuilder.buildTrim()) out.add(new Widget.Line("/ " + s, 0xFFE8D9AE));
+        out.add(new Widget.Line("# 第一阶段：设好范围（3 秒未被拒绝才进第二阶段）", Theme.BTN_TEXT_OFF));
+        for (String s : CommandBuilder.buildTrimSelection()) out.add(new Widget.Line("/ " + s, 0xFFE8D9AE));
+        out.add(new Widget.Line("# 第二阶段：服务端未报错才自动补发", Theme.BTN_TEXT_OFF));
+        out.add(new Widget.Line("/ " + CommandBuilder.trimCommand(), Theme.DANGER));
+        String radiusText = "保留半径 " + PanelState.radius;
+        if (CommandBuilder.shapeHasRadius2(PanelState.shape) && PanelState.radius2 > 0) {
+            radiusText = "保留半径 " + PanelState.radius + "/" + PanelState.radius2;
+        }
         out.add(new Widget.Line("# 形状 " + PanelState.shape + " · 中心 " + PanelState.centerMode
-                + " · 保留半径 " + PanelState.radius, Theme.BTN_TEXT_OFF));
+                + " · " + radiusText, Theme.BTN_TEXT_OFF));
         trimTa.setLines(out);
     }
 
@@ -813,6 +1120,9 @@ public class PanelScreen extends Screen {
         Widget.Slider half = new Widget.Slider(xR, 127, wR, 16, 16, 256, heatHalf, 16);
         half.onChange = v -> {
             heatHalf = v;
+            // 滑完即写入设置：之前只改内存值，重开面板就回到默认（报告 P1-30）
+            Settings.heatmapRadius = v;
+            Settings.save();
             if (canvas != null) canvas.half = v;
         };
         widgets.add(half);
@@ -823,10 +1133,19 @@ public class PanelScreen extends Screen {
         pull.iconPath = Icons.GRID;
         pull.onPress = this::pullHeatmap;
         widgets.add(pull);
+        heatPullBtn = pull;
 
         Widget.Button clear = new Widget.Button(xR, 200, wR, 18, "清空显示");
         clear.stone = true;
-        clear.onPress = () -> { PanelState.heat = null; toast("已清空热力图"); };
+        // （报告 P2-6）清空同时作废"请求中"状态，否则按钮最长 12 秒卡在"扫描中…"
+        clear.onPress = () -> {
+            PanelState.heat = null;
+            PanelState.heatRequestSentMs = 0;
+            PanelState.heatNoServer = false;
+            PanelState.nextHeatRequestId();   // 作废在途回包，清空后旧扫描结果不再回灌
+            if (heatPullBtn != null) { heatPullBtn.active = true; heatPullBtn.label = "拉取热力图"; }
+            toast("已清空热力图");
+        };
         widgets.add(clear);
 
         widgets.add(new Widget.Label(xR, 230, "绿色 = 已生成", false));
@@ -883,7 +1202,7 @@ public class PanelScreen extends Screen {
         widgets.add(new Widget.Label(28, 78, "过滤", false));
         Widget.Cycle filter = new Widget.Cycle(64, 74, 150, 18, "",
                 Arrays.asList(LOG_FILTER_NAMES), logFilter);
-        filter.onChange = i -> logFilter = i;
+        filter.onChange = i -> { logFilter = i; shownLogVersion = -1; };   // 换过滤条件立刻重建列表
         widgets.add(filter);
 
         Widget.Button copyAll = new Widget.Button(300, 74, 78, 18, "复制全部");
@@ -938,25 +1257,25 @@ public class PanelScreen extends Screen {
         widgets.add(new Widget.Label(x0, 76, "面板选项", true));
 
         Widget.Toggle particles = new Widget.Toggle(x0, 94, w0, 16, "运行粒子", Settings.particles);
-        particles.onChange = b -> Settings.particles = b;
+        particles.onChange = b -> { Settings.particles = b; Settings.save(); };
         widgets.add(particles);
         Widget.Toggle sounds = new Widget.Toggle(x0, 116, w0, 16, "完成提示音", Settings.sounds);
-        sounds.onChange = b -> Settings.sounds = b;
+        sounds.onChange = b -> { Settings.sounds = b; Settings.save(); };
         widgets.add(sounds);
         Widget.Toggle deco = new Widget.Toggle(x0, 138, w0, 16, "藤蔓角饰", Settings.decorations);
-        deco.onChange = b -> Settings.decorations = b;
+        deco.onChange = b -> { Settings.decorations = b; Settings.save(); };
         widgets.add(deco);
 
         widgets.add(new Widget.Label(x0, 164, "进度自动刷新（秒，0 = 关）", false));
         Widget.Slider refresh = new Widget.Slider(x0, 176, 190, 16, 0, 60, Settings.progressRefreshSec, 1);
-        refresh.onChange = v -> Settings.progressRefreshSec = v;
+        refresh.onChange = v -> { Settings.progressRefreshSec = v; Settings.save(); };
         widgets.add(refresh);
         refreshLb = new Widget.Label(x0 + 198, 180, "", false);
         widgets.add(refreshLb);
 
         widgets.add(new Widget.Label(x0, 202, "热力图默认窗口（区块）", false));
         Widget.Slider heatR = new Widget.Slider(x0, 214, 190, 16, 16, 256, Settings.heatmapRadius, 16);
-        heatR.onChange = v -> Settings.heatmapRadius = v;
+        heatR.onChange = v -> { Settings.heatmapRadius = v; Settings.save(); };
         widgets.add(heatR);
         heatRadiusLb = new Widget.Label(x0 + 198, 218, "", false);
         widgets.add(heatRadiusLb);
@@ -972,9 +1291,12 @@ public class PanelScreen extends Screen {
             Settings.decorations = true;
             Settings.progressRefreshSec = 5;
             Settings.heatmapRadius = 128;
+            // 界面大小也一并恢复（之前漏了这项，恢复默认后滑条还是老值）
+            Settings.uiScalePercent = 100;
+            pendingPercent = 100;
+            if (scaleSlider != null) scaleSlider.value = 100;
             Settings.save();
-            switchTab(Tab.GENERATE);
-            switchTab(Tab.CONFIG);
+            buildTab();
             toast("已恢复默认设置");
         };
         widgets.add(def);
@@ -1012,10 +1334,18 @@ public class PanelScreen extends Screen {
         Widget.Button rollback = new Widget.Button(xR, 278, 138, 18, "回滚最近一次");
         rollback.iconPath = Icons.ROLLBACK;
         rollback.onPress = () -> {
-            String[] r = PanelState.popRollback();
-            if (r == null) { toast("没有可回滚的改动"); return; }
-            CommandRunner.send(cs() + " set " + r[0] + " " + r[1]);
-            toast("已回滚 " + r[0] + " = " + r[1]);
+            // （报告 P2-3）先弹出记录、发送失败立刻原样放回去：
+            // 之前发送失败记录就丢了，用户以为还能回滚实际备份没了。
+            PanelState.SetRec rec = PanelState.popRollback();
+            if (rec == null) { toast("没有可回滚的改动"); return; }
+            String[] r = PanelState.rollbackTarget(rec);
+            // 走回滚专用通道：服务端确认成功后不会再往历史里记一条（避免反复回滚来回记）
+            if (!CommandRunner.sendRollbackSet(r[0], r[1], rec)) {
+                PanelState.restoreRollback(rec);
+                toast("回滚发送失败（不在世界里？），备份记录已放回");
+                return;
+            }
+            toast("已发送回滚 " + r[0] + " = " + r[1] + "，等服务端确认");
         };
         widgets.add(rollback);
         Widget.Button export = new Widget.Button(xR + 146, 278, wR - 146, 18, "导出备份");
@@ -1030,33 +1360,101 @@ public class PanelScreen extends Screen {
     // ==================== 动态内容刷新 ====================
 
     private void updateDynamic() {
+        long now = System.currentTimeMillis();
         if (playPauseBtn != null) {
             boolean running = PanelState.task == PanelState.Task.RUNNING;
             playPauseBtn.iconPath = running ? Icons.PAUSE : Icons.PLAY;
             if (playPauseHint != null) playPauseHint.text = running ? "暂停" : "继续";
         }
-        if (taskStatus != null) taskStatus.setLines(taskLines());
-        if (logTa != null) logTa.setLines(logLines());
-        if (setsTa != null) setsTa.setLines(setLines());
+        // 任务转为“已完成”的那一帧：面板边缘来一次金色爆闪（粒子功能此前没接上，报告 P2-13）
+        if (lastTask != PanelState.Task.DONE && PanelState.task == PanelState.Task.DONE) {
+            GuiParticles.burst(0, 0, VW, VH);
+        }
+        lastTask = PanelState.task;
+
+        if (taskStatus != null) {
+            // （报告 P2-11）任务状态行按内容签名重建：数字没变就不每帧 new 5 个 Line
+            long sig = taskSignature();
+            if (sig != shownTaskSig) {
+                taskStatus.setLines(taskLines());
+                shownTaskSig = sig;
+            }
+        }
+        // 日志 / 备份列表按版本号重建：数据没变就不每帧 new 几百个 Line 对象（报告 P1-19）
+        if (logTa != null && shownLogVersion != PanelState.logVersion) {
+            logTa.setLines(logLines());
+            shownLogVersion = PanelState.logVersion;
+        }
+        if (setsTa != null && shownSetsVersion != PanelState.setsVersion) {
+            setsTa.setLines(setLines());
+            shownSetsVersion = PanelState.setsVersion;
+        }
         if (heatHalfLb != null) heatHalfLb.text = "当前 ±" + heatHalf + " 区块";
         if (refreshLb != null) refreshLb.text = Settings.progressRefreshSec + " 秒";
         if (heatRadiusLb != null) heatRadiusLb.text = Settings.heatmapRadius + " 区块";
+
+        // 清理第一阶段还在等服务端确认时禁用“执行清理”
+        if (trimRunBtn != null) trimRunBtn.active = PanelState.trimConfirmed && !CommandRunner.isTrimPending();
+        // 只有确认窗口内（pendingTrim 非空）“取消待执行的清理”才可点
+        if (trimCancelBtn != null) trimCancelBtn.active = CommandRunner.isTrimPending();
+
+        // 握手晚于建页到达时，维度下拉跟着刷新（报告 P1-31）。只在内容真变了时重建一次。
+        if (tab == Tab.HEAT && Net.serverWorlds != shownWorlds) {
+            shownWorlds = Net.serverWorlds;
+            rebuildDims();
+            buildTab();
+            return;
+        }
+
         if (canvas != null) {
             canvas.half = heatHalf;
             int[] c = heatCenterChunks();
             canvas.scx = c[0];
             canvas.scz = c[1];
+            // 请求进行中禁用“拉取热力图”，防止连点起多个并发扫描（报告 P1-32）
+            if (heatPullBtn != null) {
+                boolean pending = !PanelState.heatNoServer
+                        && PanelState.heatRequestSentMs > 0
+                        && now - PanelState.heatRequestSentMs < 12000
+                        && (PanelState.heat == null || PanelState.heat.receivedMs < PanelState.heatRequestSentMs);
+                heatPullBtn.active = !pending;
+                heatPullBtn.label = pending ? "扫描中…" : "拉取热力图";
+            }
         }
+    }
+
+    /** 任务状态行的内容签名：任务状态、进度、剩余/耗时（秒级）、异常计数、原始回包哈希。 */
+    private long taskSignature() {
+        long h = 1469598103934665603L;
+        h = mix(h, PanelState.task.ordinal());
+        h = mix(h, (long) PanelState.percent);
+        h = mix(h, PanelState.processed);
+        h = mix(h, PanelState.total);
+        h = mix(h, PanelState.elapsedNow() / 1000);
+        h = mix(h, PanelState.etaMs / 1000);
+        h = mix(h, PanelState.errors);
+        h = mix(h, PanelState.warnings);
+        h = mix(h, PanelState.sessionErrors);
+        h = mix(h, PanelState.sessionWarnings);
+        String raw = PanelState.taskRawStatus;
+        h = mix(h, raw == null ? 0 : raw.hashCode());
+        return h;
+    }
+
+    private static long mix(long h, long v) {
+        h ^= v;
+        return h * 1099511628211L;
     }
 
     private List<Widget.Line> taskLines() {
         List<Widget.Line> out = new ArrayList<>();
         boolean idle = PanelState.task == PanelState.Task.NONE;
-        out.add(new Widget.Line("状态：" + taskText(PanelState.task), levelColor(
-                PanelState.task == PanelState.Task.FAILED ? PanelState.Level.ERROR : PanelState.Level.INFO)));
+        out.add(new Widget.Line("状态：" + taskText(PanelState.task), Theme.TEXT_LIGHT));
         out.add(new Widget.Line("已耗时：" + (idle ? "--" : Theme.fmtDuration(PanelState.elapsedNow())), Theme.TEXT_LIGHT));
         out.add(new Widget.Line("预计剩余：" + (idle ? "--" : Theme.fmtDuration(PanelState.etaMs)), Theme.TEXT_LIGHT));
-        out.add(new Widget.Line("异常 " + PanelState.errors + " 条 · 警告 " + PanelState.warnings + " 条",
+        // 当前任务计数与会话累计分开：清掉任务后不再显示“异常 N 条”的旧账（报告 P1-18）
+        out.add(new Widget.Line("异常 " + PanelState.errors + " 条 · 警告 " + PanelState.warnings + " 条"
+                        + "（本次会话累计 " + PanelState.sessionErrors + "/" + PanelState.sessionWarnings + "）",
                 PanelState.errors > 0 ? 0xFFFF7A66 : Theme.TEXT_LIGHT));
         out.add(new Widget.Line("原始回包：" + (PanelState.taskRawStatus == null || PanelState.taskRawStatus.isBlank()
                 ? "（还没收到）" : PanelState.taskRawStatus), Theme.BTN_TEXT_OFF));
@@ -1066,7 +1464,7 @@ public class PanelScreen extends Screen {
     private List<Widget.Line> setLines() {
         List<Widget.Line> out = new ArrayList<>();
         List<PanelState.SetRec> recs = PanelState.setsSnapshot();
-        SimpleDateFormat fmt = new SimpleDateFormat("HH:mm:ss");
+        SimpleDateFormat fmt = HHMMSS;
         for (int i = recs.size() - 1; i >= 0 && out.size() < 40; i--) {
             PanelState.SetRec r = recs.get(i);
             out.add(new Widget.Line(fmt.format(new Date(r.time)) + "  " + r.key + ": "
@@ -1095,7 +1493,6 @@ public class PanelScreen extends Screen {
             case RUNNING -> "正在生成";
             case PAUSED -> "已暂停";
             case DONE -> "已完成";
-            case FAILED -> "出错了";
             default -> "空闲（没有正在跑的任务）";
         };
     }

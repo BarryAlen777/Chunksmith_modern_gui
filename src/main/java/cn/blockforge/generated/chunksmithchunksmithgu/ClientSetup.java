@@ -38,5 +38,6 @@ public final class ClientSetup {
     public static void onClientSetup(FMLClientSetupEvent event) {
         LogCapture.init();
         MinecraftForge.EVENT_BUS.register(new ClientKeys.TickEvents());
+        PanelState.warmUpSets();   // 把 /cs set 备份历史从配置目录读回内存
     }
 }
